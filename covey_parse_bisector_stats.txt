@@ -1,0 +1,790 @@
+;-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+FUNCTION DOWNHILL_MASK, comb, lag, peak_lag
+;maps out the ccf peaks
+
+;find the subset of the cc function centered on the peak
+still_looking_lower = 1
+
+;make sure the location of the peak is not on the edge of the lag space so it doesn't stray beyond that range and stop if reaches the edge
+if peak_lag gt 7 then peak_low = peak_lag-2 else peak_low = peak_lag + 1
+
+;search the ccf array to map out where the change is positive - maps concave down structure moving away from the max in both directions
+WHILE still_looking_lower GT 0 DO BEGIN
+                                  
+   IF peak_low GT 2 AND comb[peak_low-1] - comb[peak_low] LT 0 AND comb[peak_low-1] GT 0 THEN peak_low = peak_low-1 ELSE still_looking_lower = 0
+ 
+ENDWHILE
+
+still_looking_upper = 1
+if peak_lag lt 394 then peak_high = peak_lag+2 else peak_high = peak_lag - 1
+WHILE still_looking_upper GT 0 DO BEGIN
+
+   IF peak_high LT 399 AND comb[peak_high+1] - comb[peak_high] LT 0 AND comb[peak_high+1] GT 0 THEN peak_high = peak_high+1 ELSE still_looking_upper = 0
+
+ENDWHILE
+
+n_lag = n_elements(lag)
+mask = INTARR(n_lag)
+mask[*] = 0
+
+;wait =  get_kbrd(1)
+
+;PRINT, peak_low, peak_high, n_lag
+
+if peak_low LT 0 THEN peak_low = 0
+if peak_high GT n_lag-1 THEN peak_high = n_lag-1
+
+mask[peak_low:peak_high] = 1
+
+RETURN, mask
+END
+;-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+FUNCTION FIND_APOGEE_CCF_PEAKS_RETURN_LAGS, comb, lag
+;used for linked apogee peaks - find the lowest separation visit if all data was input. If one is selected (the call to this uses the widest separation visit) finds the location of the primary and secondary
+;and heights of the ccf data at these locations
+
+;find the primary peak which is the maximum value of the ccf (visits only). Primary_lag is the index of max comb
+primary_peak_height = MAX(comb, primary_lag)
+IF primary_lag GT 401 THEN BEGIN
+   PRINT, 'Long CCF: ',N_ELEMENTS(comb)
+   primary_peak_height = MAX(comb[0:400], primary_lag)
+ENDIF
+
+;array with 1's in indices between peak_low and peak_high and 0's everywhere else
+primary_peak = DOWNHILL_MASK(comb, lag, primary_lag)
+
+;n_secondary is number of 0's, search_for_secondary finds all 0's
+search_for_secondary = WHERE(primary_peak EQ 0, n_secondary)
+;searches those 0's indices for a maximum (the second peak) and returns it and its index
+secondary_peak_height = MAX(comb[search_for_secondary], secondary_lag)
+;make an array to return the results
+RETURN, [primary_lag, lag[primary_lag], primary_peak_height, search_for_secondary[secondary_lag], lag[search_for_secondary[secondary_lag]], secondary_peak_height]
+;returns lag index of primary peak ccf, value of primary peak ccf, index of secondary peak ccf, value of secondary peak ccf
+
+END
+
+;-----------------------
+;+
+; ROUTINE: contour_plus
+;
+; CALLING SEQUENCE: contour_plus,x,y,[max_den,xbin=,ybin=, $
+;                   levels=,return_levels=,nlevels=,/no_fill,/no_contour,
+;                   /no_line,/no_points,/pixel,/reverse,/all_points,/OVERPLOT]
+;
+; PURPOSE:
+;       Create plots w/ filled contours over high density
+;       regions. Removes data points under contours to reduce file
+;       size.
+;
+;     * This is a total rewrite of CONTOUR_PLUS, having stolen the
+;       idea from Anil Seth's 2005 version. This version uses
+;       HISTOGRAM & reverse indexing to remove data under contours,
+;       which runs at least 10X faster, and scales better with large
+;       data sets.
+;
+; INPUT: x,y
+;	Vectors of values to plot
+;
+; OPTIONAL INPUT:
+;       LEVELS: an arry of levels to plot with contours. If not set,
+;       CONTOUR_PLUS will use a default scheme.
+;
+;	MAX_DEN: maximum density before contours are plotted. If not
+;	set, CONTOUR_PLUS will try to use the lowest LEVELS
+;
+;       XBIN/YBIN: bin size in the horizontal/vertical direction. If
+;       not set, CONTOUR_PLUS will use 25 bins in each direction
+;
+;       RETURN_LEVELS: user selected output vector which contains all
+;       the levels CONTOUR_PLUS uses.
+;           NOTES: a) this *could* already be accomplished by just
+;                     setting LEVELS= a new variable, but may be more
+;                     intuitive this way
+;                  b) auto-selecting levels is very difficult to
+;                     generalize for all types of data, this is a very
+;                     helpful way to get the right levels for you
+;
+;       TRIMLEVEL: the first contour level to remove data from. By
+;       default CONTOUR_PLUS plots the data under the first 2 levels
+;       to ensure no gaps between points/contours form.
+;
+;       NLEVELS: the number of levels to automatically use. Does not
+;       apply if LEVEL has been used. [Default = 8]
+;
+; KEYWORD INPUT:
+;       /NO_FILL: use only lined contours, not filled contours
+;
+;       /NO_CONTOUR: suppress the contours, only plot the points which
+;       fall below the maximum density
+;
+;       /NO_POINTS: suppress the points of data, contours only
+;
+;       /NO_LINE: suppress tracing lines between contour levels.
+;
+;       /PIXEL: draw pixels at each bin instead of contours. Uses a
+;       modified version of my PIXEL_CONTOUR script. /PIXEL works best
+;       if you do not set the LEVELS=
+;
+;       /REVERSE: reverse the color table for the contours. This uses
+;       REVERSE_CT by D Fanning (included)
+;
+;       /ALL_POINTS: do not remove the data below the contours.
+;       Defeats the purpose of this program, but ensures no gaps
+;       between points and contours.
+;
+;       /OVERPLOT: put on top of existing plot. Very useful in
+;       combination with /NO_FILL and /NO_POINTS for overplotting
+;       open contours.
+;
+; COMMON ERRORS:
+;	- Small gaps between the plotted data and contours can appear,
+;	  as happened in the original CONTOUR_PLUS. This can be avoided
+;	  with the /PIXEL keyword.
+;       - The program does not handle /xlog or /ylog very well.
+;
+; VERSION:- (April 2010) Written from scratch [JRAD]
+;         - (April 2010) problem noticed: if you contour a uniform
+;           field, it can crash when given levels... fixed w/ levels?
+;         - (May 2010) Centering of contours fixed, min # of levels
+;           added, pixels colors "top-out" at 255 now, dont wrap to
+;           back to 0 [JRAD]
+;         - (Sept 2010) Add RETURN_LEVELS option for clarity, tweaked
+;           default contour levels [JRAD]
+;         - (Feb 2011) Added TRIMLEVEL to control which which contour
+;           is used to cut out data [JRAD]
+;         - (Feb 2011) Fixed PIXEL color levels to be the same as the
+;           contour color levels [JRAD]
+;         - (April 2011) Fixed crashes w/ LOW error when contours were
+;           too high or no data present within X/Yrange [JRAD]
+;         - (April 2011) Fixed fact that /NO_FILL did nothing [JRAD]
+;         - (July 2011) Added compiler options
+;         - (Jan 2012) Added NLEVEL [JRAD]
+;         - (Feb 2012) Adjusted color levels, won't show total
+;           white. This may not be what others want, but I like it
+;           better, especially using with CUBEHELIX [JRAD]
+;         - (Aug 2012) added background color to fix "holes"
+;         - (Oct 2012) if MAX_DEN=1 set /NO_POINTS by default
+;         - put on GitHub, versions now kept there
+;
+;
+; AUTHOR:  J.R.A. Davenport, University of Washington, April 2010
+;	   jrad@astro.washington.edu
+;
+;I would appreciate a simple acknowledgement for published works using my code:
+;   "This publication has made use of code written by James R. A. Davenport."
+;
+; PROCEDURES CALLED
+;
+;    REVERSE_CT    [dfanning library] - included
+;    HIST_ND       [dfanning library]
+;    http://www.dfanning.com/programs/hist_nd.pro
+;
+;-
+
+;==================================================================
+PRO Reverse_CT,set=set
+; This program reverses the current color table
+; Compliments of D Fanning
+; http://www.dfanning.com/color_tips/reverse_ct.html
+if keyword_set(set) then begin
+TVLCT, r, g, b, /Get
+TVLCT, Reverse(r), Reverse(g), Reverse(b)
+endif
+return
+END
+;==================================================================
+
+pro contour_plus, x, y, max_den, xbin=xbin, ybin=ybin, levels=levels, $
+                  return_levels=return_levels, no_fill=no_fill,$
+                  no_contour=no_contour, no_line=no_line, no_points=no_points,$
+                  pixel=pixel, reverse=reverse, psym=psym, all_points=all_points,$
+                  overplot=overplot, trimlevel=trimlevel, nlevels=nlevels,$
+                  _extra = e,hist=hist
+
+; set options for the compiler
+compile_opt defint32, strictarr, strictarrsubs
+; suppress some outputs
+compile_opt HIDDEN
+
+  On_error,2
+  if N_params() LT 2 then begin
+     PRINT, 'Error: must provide X and Y coordinates.'
+     PRINT, 'contour_plus,x,y,max_den,xbin=xbin,ybin=ybin,levels=levels,no_fill=no_fill,no_contour=no_contour,no_line=no_line,no_points=no_points,pixel=pixel,reverse=reverse,psym=psym,all_points=all_points, _extra = e'
+     return
+  endif
+
+; Use the X/Yrange to set limits of the histogram
+  ymin = min(y)                 ;
+  ymax = max(y)                 ; set these incase no others
+  xmin = min(x)                 ; are set by the user
+  xmax = max(x)                 ;
+  if keyword_set(e) then begin
+     if total(tag_names(e) eq 'YRANGE') eq 1 then ymin=min(e.yrange)
+     if total(tag_names(e) eq 'YRANGE') eq 1 then ymax=max(e.yrange)
+     if total(tag_names(e) eq 'XRANGE') eq 1 then xmin=min(e.xrange)
+     if total(tag_names(e) eq 'XRANGE') eq 1 then xmax=max(e.xrange)
+  endif
+
+; incase no x/ybin has been set, make 25 bins
+  if not keyword_set(xbin) then xbin = (abs(xmax-xmin)/25.)
+  if not keyword_set(ybin) then ybin = (abs(ymax-ymin)/25.)
+
+;;   if total(x ge xmin and x le xmax and y ge ymin and y le ymax) le 1 then begin
+;;      PRINT, 'ERROR: Not enough data within the specified X/Yrange. Please adjust your range and try again!'
+;;      return
+;;   endif
+
+; parse up the data in a 2d histogram. use HIST_ND rather than HIST_2D
+; for the reverse_indicies functionality
+  hist = hist_nd(transpose([[x],[y]]),[xbin,ybin],$
+                 min=[xmin,ymin],max=[xmax,ymax],REVERSE_INDICES=ri)
+
+; FIX error when no data is within range, quit gracefully
+if total(hist) eq 0 then begin
+   PRINT, 'ERROR: No data within specified X/Yrange!'
+   PRINT, '       Please adjust the X/Yrange and try again.'
+   return
+endif
+
+; If a threshhold density is not set, then use the minimum of the
+; levels if available, otherwise choose one based on the Std Dev.
+if (not keyword_set(max_den) and keyword_set(levels)) then max_den=min(levels)
+if (not keyword_set(max_den) and not keyword_set(levels)) then $
+   max_den = stddev(hist,/NAN)
+
+if max_den eq 1 then no_points = 1
+
+histsz = size(hist)
+xx = findgen(histsz[1])*xbin + xmin
+yy = findgen(histsz[2])*ybin + ymin
+
+; SOME DEFAULT CONTOUR LEVELS, MAYBE NOT WHAT YOU WANT...
+if not keyword_set(nlevels) then nlevels=8
+if not keyword_set(levels) then $
+   levels = lindgen(nlevels)^2.3*stddev(hist)/(nlevels*1.5)+max_den
+
+;make sure there's a couple levels
+if n_elements(levels) le 1 then begin
+   PRINT, 'Caution: Minimum level too low, adding 1.'
+   levels = [levels,max(levels)+max_den,max(levels)+2.*max_den]
+endif
+
+; FIX problem where min level is < 1, which made it barf!
+; Note that *no* data will be contoured in this case
+if levels[0] lt 1 then levels = levels + 1.
+
+
+; return levels to user if desired, good for "interactive" use
+return_levels = levels
+
+;============================================================
+; Use the MIN_DEN to cut the high density data from the plot.
+; This uses histogram's reverse_indicies to run super fast
+;       -----------> this is the magic! <---------
+if not keyword_set(trimlevel) then trimlevel=2
+if trimlevel lt 1 then trimlevel = 1
+keep = where(hist le levels[trimlevel])
+for i=0L,n_elements(keep)-1L do begin
+   k=keep[i]
+   if ri[k+1] gt ri[k] then $
+      if n_elements(low) eq 0 then low=ri[ri[k]:ri[k+1]-1] $
+      else low=[low,ri[ri[k]:ri[k+1]-1]]
+endfor
+; This code was modified from JD Smith's HISTOGRAM tutorial
+; http://www.idlcoyote.com/tips/histogram_tutorial.html
+; formerlly http://www.dfanning.com/tips/histogram_tutorial.html
+;============================================================
+
+if not keyword_set(psym) then psym=3
+
+; NOT overplot
+if keyword_set(all_points) and not keyword_set(overplot) then $
+   plot,x,y,psym=psym,_extra=e
+
+
+if not keyword_set(no_points) and $
+   not keyword_set(all_points) and $
+   not keyword_set(overplot) then $
+      plot,x[low],y[low],_extra=e,psym=psym
+
+if keyword_set(no_points) and $
+   not keyword_set(all_points) and $
+   not keyword_set(overplot) then $
+      plot,x,y,_extra=e,/nodata
+;------
+; YES overplot
+if keyword_set(all_points) and  keyword_set(overplot) then $
+   oplot,x,y,psym=psym,_extra=e
+
+if not keyword_set(no_points) and $
+   not keyword_set(all_points) and $
+   keyword_set(overplot) then $
+      oplot,x[low],y[low],_extra=e,psym=psym
+
+;------
+
+if keyword_set(reverse) then reverse_ct,/set
+
+if keyword_set(pixel) then no_contour = 1 ; if pixels, dont draw contours
+
+clrz = findgen(n_elements(levels))/(n_elements(levels)+1)*254.
+if keyword_set(reverse) then $
+   clrz = (findgen(n_elements(levels))+1)/(n_elements(levels)+1)*254.
+
+bcolor=255
+if keyword_set(reverse) then bcolor = 0 ; fix holes with proper background color
+
+fillyn = 1
+if keyword_set(no_fill) then fillyn = 0
+if not keyword_set(no_contour) and not keyword_set(no_fill) then begin
+ ; if you do want the FILLED contours
+   xx=xx+xbin/2. & yy=yy+ybin/2.
+   contour,hist,xx,yy,/overplot,fill=fillyn,levels=levels,$
+           c_color=clrz,background=bcolor,_extra=e
+   if not keyword_set(no_line) then $
+      contour,hist,xx,yy,/overplot,color=!p.background,levels=levels,_extra=e
+endif
+if not keyword_set(no_contour) and keyword_set(no_fill) then begin
+ ; if you do want the EMPTY contours
+   xx=xx+xbin/2. & yy=yy+ybin/2.
+   contour,hist,xx,yy,/overplot,fill=fillyn,levels=levels,_extra=e
+endif
+
+if keyword_set(pixel) then begin ; pixels
+   for l=0L,n_elements(xx)-1 do begin
+   for n=0L,n_elements(yy)-1 do begin
+      if hist[l,n] ge max_den then begin
+         xarr = [xx[l],xx[l]+xbin,xx[l]+xbin,xx[l],xx[l]]
+         yarr = [yy[n],yy[n],yy[n]+ybin,yy[n]+ybin,yy[n]]
+
+; pixel colors that match contour colors
+         color = 255./(n_elements(levels)+1)*(total(levels le hist[l,n])-1)
+; ensure the colors dont wrap around, keep the "max" at 255
+         if hist[l,n] ge max(levels) then $
+            color = 255.-255./(n_elements(levels)+1)
+
+         if keyword_set(reverse) then color = color+255./(n_elements(levels)+1)
+
+         polyfill,color=color[0],[xarr],[yarr],/fill ;,_extra = e
+      endif
+   endfor
+   endfor
+endif
+
+
+if keyword_set(reverse) then reverse_ct,/set
+
+return
+end
+
+;---------------------------
+FUNCTION measure_r, comb, velocity_axis, peak_loc
+
+;measure r statistic for this cross correlation routine
+
+;find the length of the cc function
+n_cc = N_ELEMENTS(comb)
+
+;split the cross-correlation array on its
+;peak
+IF n_cc GT peak_loc*2 THEN BEGIN
+     low_comb = comb[0:peak_loc]
+     high_comb = comb[peak_loc:2*peak_loc]
+ENDIF ELSE BEGIN
+     low_comb = comb[2*peak_loc-n_cc+1:peak_loc]
+     high_comb = comb[peak_loc:n_cc-1]
+ENDELSE
+
+;flip the low side
+low_comb = REVERSE(low_comb)
+
+IF N_ELEMENTS(low_comb) EQ N_ELEMENTS(high_comb) THEN BEGIN
+
+    one_over_2n = 1./(2*N_ELEMENTS(low_comb))
+    sigma_a = SQRT( one_over_2n * TOTAL( (high_comb-low_comb)^2.  ) )
+    height = comb[peak_loc]
+    r = height/(SQRT(2)*sigma_a)
+    
+;    PRINT, one_over_2n, sigma_a, height, r
+
+RETURN, r
+
+ENDIF ELSE PRINT, 'problem with my r calculation!!!'
+
+END
+;---------------------------
+
+PRO parse_bisector_stats
+
+;read in the apVisit file
+visits = MRDFITS('/Volumes/CoveyData/APOGEE_Spectra/APOGEE2_DR13/allVisit-l30e.2.fits',1)
+n_visits = N_ELEMENTS(visits)
+
+HELP, visits, /str
+
+PRINT, 'Total Visits: ', n_visits
+
+use_visit = INTARR(n_visits)
+use_visit[*] = 0
+
+visit_plate_mjd_fiber = STRARR(n_visits)
+
+FOR i=0L, n_visits-1 DO BEGIN
+
+   first_fiber_string = STRTRIM(STRING(visits[i].fiberid),2)
+   IF STRLEN(first_fiber_string) EQ 3 THEN fiber_string = first_fiber_string ELSE BEGIN
+      IF STRLEN(first_fiber_string) EQ 1 THEN fiber_string = '00'+first_fiber_string 
+      IF STRLEN(first_fiber_string) EQ 2 THEN fiber_string = '0'+first_fiber_string
+   ENDELSE
+
+   visit_plate_mjd_fiber[i] = STRTRIM(visits[i].plate,2)+'-'+STRTRIM(STRING(visits[i].mjd),2)+'-'+fiber_string
+   IF ( (visits[i].SNR GT 30.) AND ( (visits[i].apogee_target2 and 2L^9) EQ 0) ) THEN use_visit[i] = 1 ELSE use_visit[i] = 0
+
+   IF i MOD 10000 EQ 0 THEN PRINT, i
+
+ENDFOR
+
+use_visits = WHERE(use_visit EQ 1, n_use_visits)
+
+PRINT, 'Usable Visits: ', n_use_visits
+
+;wait = GET_KBRD(1)
+
+;Read in the Bisector Stats
+READCOL, 'DR13_Bisector_Stats.lis', FORMAT = '(A,A,F,F,F,F,F,F,F,F,F,F,F,F,F)', two_ID, visit_ID, visit_r, visit_x_range, visit_x_median, visit_x_mean, visit_x_diff, visit_x_01, visit_x_03, visit_x_05, visit_x_07, visit_x_09, visit_FWHM, visit_height, visit_thresh
+n_bisectors = N_ELEMENTS(two_ID)
+
+use_bisectors = INTARR(n_bisectors)
+bisector_slopes = FLTARR(n_bisectors) 
+bisector_ys = [0.3, 0.5, 0.7, 0.9]
+
+
+dip_depth_abs = FLTARR(n_bisectors)
+dip_depth_rel = FLTARR(n_bisectors)
+r_ratio = FLTARR(n_bisectors)
+
+PRINT, 'Bisector Calcs: ', n_bisectors
+
+;wait = GET_KBRD(1)
+
+;            2MASS_ID            Visit_ID         R  x_range   x_median   x_mean   Diff_in_x      x@y=0.1      x@y=0.3      x@y=0.5      x@y=0.7      x@y=0.9         FWHM    Height   Thresh 
+;  2M00000032+5737103      5583-56257-005    24.92     9.67        -0.07     0.84    -0.91        -4.03         5.65         2.72        -0.08        -0.07      10.00       0.83         0.31
+
+++++++++++++++++++	   	    NOT NECESSARY?    	     	  +++++++++++++++++++++++++++++++++++++++++++++++++++
+
+;read in Drew's list
+READCOL, '/Volumes/CoveyData/APOGEE_Spectra/APOGEE_DR12_ApStar/DrewsList.tbl', FORMAT = '(I,I,F,A)', drew_num, drew_visit, drew_mag, drew_id
+
+CLOSE, 8
+;OPENW, 8, 'DR13_just_CCF_stats.lis'
+OPENW, 8, 'DR13_CCF_stats_w_dip_depths_several_rs.lis'
+
+PRINTF, 8, FORMAT = '(A15,2x,A9,2x,A15,2x,A8,2x,A8,2x,A8,2x, A10,2x, A10,2x, A10,2x, A10,2x, A10,2x, A10,2x, A10,2x, A10,2x, A10,2x,A8,2x,A8,2x,A8,2x, A8,2x,A8, 2x,A8,2x,A8,2x,A8,2x,A8,2x,A8, 2x,A8,2x,A8,2x,A8,2x,A8,2x,A8)', $
+           '2MASS_IDs', 'DrewsList', 'LOC-MJD-Fiber', 'SNR', $
+           'Peak_401', 'R_401', 'Peak_151', 'R_151', 'Peak_101', 'R_101', 'Peak_51', 'R_51', $ 
+           'x_range', 'x_median', 'x_mean', 'x_diff', $
+           'bisec0', 'bisec1', $
+           'x_01', 'x_03', 'x_05', 'x_07', 'x_09', $
+           'FWHM', 'height', 'thresh', 'DipAbs', 'DipRel'
+
+;CLOSE, 7
+;OPENW, 7, 'DR13_Bisector_stats_with_fit+CCF+miniR.v2.lis'
+
+;PRINTF, 7, FORMAT = '(A400)', '2MASS_ID            AP_bin     VISIT_ID         vis_r r_ratio vis_x_range vis_x_med vis_x_mean vis_x_diff bisec_fit_A  bisec_fit_B vis_x_01 vis_x_03 vis_x_05 vis_x_07 vis_x_09 vis_FWHM vis_height vis_thresh |->  REMAINING_COLUMNS_ARE_CCF_VALUES_FOR_LAGS = -200-to-200'
+
+on_drews_list = INTARR(n_bisectors)
+on_drews_list[*] = 0
+
+;two_ID[i], on_drews_list[i], visit_ID[i], visit_r[i], r_ratio[i], dip_depth_abs[i], dip_depth_rel[i], visit_x_range[i], visit_x_median[i], visit_x_mean[i], visit_x_diff[i], bisector_fit[0], bisector_fit[1], visit_x_01[i], visit_x_03[i], visit_x_05[i], visit_x_07[i], visit_x_09[i], visit_FWHM[i], visit_height[i], visit_thresh[i]
+dummystring = 'dummystring'
+dummyflt = -99.
+dummydbl = -99.d
+dummyint = -99
+
+structdef = {two_ID: dummystring, on_drews_list: dummyint, visit_ID:dummystring, visit_r: dummyflt, r_ratio: dummyflt, dip_depth_abs: dummyflt, dip_depth_rel:dummyflt, $
+visit_x_range: dummyflt, visit_x_median:dummyflt, visit_x_mean: dummyflt, visit_x_diff:dummyflt, bisector_fit_intercept: dummyflt, bisector_fit_slope: dummyflt, $
+visit_x_01: dummyflt, visit_x_03: dummyflt, visit_x_05:dummyflt, visit_x_07:dummyflt, visit_x_09:dummyflt, visit_FWHM:dummyflt, visit_height:dummyflt, visit_thresh:dummyflt}
+the_binary_candidates = REPLICATE(structdef, n_bisectors)
+
+FOR i=0L, n_bisectors-1 DO BEGIN
+
+   drew_match = WHERE(STRTRIM(two_ID[i],2) EQ STRTRIM(drew_id,2), n_drew)
+   IF n_drew EQ 1 THEN on_drews_list[i] = 1 ELSE on_drews_list[i] = 0
+
+;; WHAT IS THIS DOING???? 
+   counterpart = WHERE(visit_plate_mjd_fiber EQ STRTRIM(visit_ID[i],2), n_counterpart)
+   IF n_counterpart EQ 1 THEN BEGIN
+
+      visit_snr = visits[counterpart].snr
+
+      IF use_visit[counterpart] EQ 1 THEN BEGIN 
+         use_bisectors[i] = 1 
+         bisector_fit = LINFIT([visit_x_03[i], visit_x_05[i], visit_x_07[i], visit_x_09[i]], bisector_ys)
+         bisector_slopes[i] = bisector_fit[1]
+      ENDIF ELSE BEGIN
+            use_bisectors[i] = 0
+            bisector_slopes[i] = 0
+            bisector_fit = [0,0]
+      ENDELSE
+
+   ENDIF ELSE visit_snr = -99.
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+   ;construct the path to the apStar file
+   apStarPath = '/Volumes/CoveyData/APOGEE_Spectra/APOGEE2_DR13/'+STRTRIM(visits[counterpart[0]].location_id,2)+'/apStar-r6-'+STRTRIM(two_id[i],2)+'.fits'
+   apStarExists = FILE_TEST(apStarPath)
+   apStarCPath = '/Volumes/CoveyData/APOGEE_Spectra/APOGEE2_DR13/'+STRTRIM(visits[counterpart[0]].location_id,2)+'/apStarC-r6-'+STRTRIM(two_id[i],2)+'.fits'
+   apStarCExists = FILE_TEST(apStarCPath)
+   ;print, apStarExists, apStarCExists
+   IF apStarExists+apStarCExists GE 1 THEN BEGIN
+
+      IF apStarExists EQ 1 THEN BEGIN
+         apload, apStarPath, binary, /silent 
+;         get_header = READFITS(apStarPath, EXTEN = 0, header, /SILENT)
+         ;PRINT, i, '  ', STRTRIM(visits[counterpart[0]].location_id,2)+'/apStar-r6-'+STRTRIM(two_id[i],2)+'.fits', '  ', STRMID(STRTRIM(visit_ID[i],2),5,5)
+      ENDIF ELSE BEGIN
+         apload, apStarCPath, binary, /silent
+;         get_header = READFITS(apStarCPath, EXTEN = 0, header, /SILENT)
+         ;PRINT, i, '  ', STRTRIM(visits[counterpart[0]].location_id,2)+'/apStarC-r6-'+STRTRIM(two_id[i],2)+'.fits', '  ', STRMID(STRTRIM(visit_ID[i],2),5,5)
+      ENDELSE
+
+;   apStarPath = '/Volumes/CoveyData/APOGEE_Spectra/APOGEE2_DR13/'+STRTRIM(visits[counterpart[0]].location_id,2)+'/apStar-r6-'+STRTRIM(two_id[i],2)+'.fits'
+;   apStarExists = FILE_TEST(apStarPath)
+   ;print, apStarExists
+;   IF apStarExists EQ 1 THEN BEGIN
+;      apload, apStarPath, binary
+
+      all_ccfs = N_ELEMENTS(binary.rv.ccf[0,*])
+      
+      ;PRINT, all_ccfs
+
+;  2M00000032+5737103      5583-56257-005    24.92     9.67        -0.07     0.84    -0.91        -4.03         5.65         2.72        -0.08        -0.07      10.00       0.83         0.31
+
+
+      plate_num = FLOAT(STRMID(STRTRIM(visit_ID[i],2),0,4))
+      mjd_num = FLOAT(STRMID(STRTRIM(visit_ID[i],2),5,5))
+      fiber_num = FLOAT(STRMID(STRTRIM(visit_ID[i],2),11,3))
+
+      this_visit = WHERE(binary.rv.mjd EQ mjd_num AND binary.rv.plate EQ plate_num AND binary.rv.fiber EQ fiber_num, n_this_visit)
+
+;      PRINT, 'this_visit: ', this_visit
+
+;      snr_fieldname = 'SNRVIS'+STRTRIM(STRING(this_visit+1),2)
+;      PRINT, snr_fieldname
+;      snr_value = SXPAR(header, snr_fieldname)
+;      PRINT, 'snr_value: ', snr_value, snr_value2
+;      JD_fieldname = 'JD'+STRTRIM(STRING(this_visit+1),2)
+;      JD_value = SXPAR(header, JD_fieldname)
+;      PRINT, 'mjd_num: ', mjd_num, '    JD: ', JD_value, '   JD2: ', visits[counterpart[0]].MJD
+;;      fiber_fieldname = 'FIBER'+STRTRIM(STRING(this_visit+1),2)
+;      fiber_value = SXPAR(header, fiber_fieldname)
+;      PRINT, 'fiber_num: ', fiber_num, '    fiber: ', fiber_value, '  fiber2: ', visits[counterpart[0]].fiberID
+
+      IF all_ccfs GE 3 THEN BEGIN
+         only_visit_ccfs = binary.rv.ccf[*,2:all_ccfs-1]
+         n_visits = all_ccfs-2
+      ENDIF ELSE BEGIN
+         only_visit_ccfs = binary.rv.ccf[*,*]
+         n_visits = all_ccfs
+      ENDELSE
+
+      ;measure r for the full CCF
+      primary_peak_height_401 = MAX(only_visit_ccfs[*,this_visit], primary_lag)
+      r_401 = MEASURE_R(only_visit_ccfs[*,this_visit], binary.rv.ccflag, primary_lag)
+
+      ;measure r for the inner 151
+      primary_peak_height_151 = MAX(only_visit_ccfs[125:276,this_visit], primary_lag_151)
+      r_151 = MEASURE_R(only_visit_ccfs[125:276,this_visit], binary.rv.ccflag[125:276], primary_lag_151)
+
+      primary_peak_height_101 = MAX(only_visit_ccfs[150:251,this_visit], primary_lag_101)
+      r_101 = MEASURE_R(only_visit_ccfs[150:251,this_visit], binary.rv.ccflag[150:251], primary_lag_101)
+
+      primary_peak_height_51 = MAX(only_visit_ccfs[175:226,this_visit], primary_lag_51)
+      r_51 = MEASURE_R(only_visit_ccfs[175:226,this_visit], binary.rv.ccflag[175:226], primary_lag_51)
+
+      ;r_ratio[i] = remeasured_r_midrange/visit_r[i]
+
+                                ;find the minimum between the peaks,
+                                ;and measure the fractional dip depth 
+      found_peaks = FIND_APOGEE_CCF_PEAKS_RETURN_LAGS(only_visit_ccfs[*,this_visit], binary.rv.ccflag)
+
+      IF found_peaks[0] GT found_peaks[3] THEN BEGIN
+         local_min = MIN(only_visit_ccfs[found_peaks[3]:found_peaks[0],this_visit], local_min_index)
+         real_local_min_index = local_min_index + found_peaks[3]
+      ENDIF ELSE BEGIN
+         local_min = MIN(only_visit_ccfs[found_peaks[0]:found_peaks[3],this_visit], local_min_index)
+         real_local_min_index = local_min_index + found_peaks[0]
+      ENDELSE
+
+      ;PRINT, found_peaks[5], local_min
+
+      dip_depth_abs[i] = found_peaks[5] - local_min
+      dip_depth_rel[i] = (found_peaks[5] - local_min) / found_peaks[5]
+
+;      PLOT, binary.rv.ccflag, only_visit_ccfs[*,this_visit]
+;      OPLOT, [binary.rv.ccflag[found_peaks[0]],binary.rv.ccflag[found_peaks[0]]], [primary_peak_height, primary_peak_height], PSYM = 4, SYMSIZE = 1.5
+;      OPLOT,   [binary.rv.ccflag[found_peaks[3]],binary.rv.ccflag[found_peaks[3]]], [found_peaks[5],found_peaks[5]], PSYM = 4, SYMSIZE = 1.5
+;      OPLOT, [binary.rv.ccflag[real_local_min_index],binary.rv.ccflag[real_local_min_index]], [local_min, local_min], PSYM = 2, SYMSIZE = 1.5
+
+
+;      PRINT, STRMID(STRTRIM(visit_ID[i],2),5,5)
+;      PRINT, r_ratio[i]
+;      PRINT, visit_ID[i]
+;      PRINT, binary.rv.mjd
+;      PRINT, binary.rv.mjd[this_visit]
+;      PRINT, visit_r[i], remeasured_r, remeasured_r_midrange
+
+;      PRINT, 'waiting!'
+;      wait = GET_KBRD(1)
+
+   IF i MOD 5000 EQ 0 THEN PRINT, i
+
+;   PRINTF, 7, FORMAT = '(A20,2x,I1,2x,A20,2x,F8.3,2x,F10.4,2x,F8.3,2x,F8.3,2x,F8.3,2x,F8.3,2x,F8.4,2x,F8.4,2x,F8.3,2x,F8.3,2x,F8.3,2x,F8.3,2x,F8.3,2x,F8.3,2x,F8.3,2x,F8.3,2x,401(F9.4,2x))', two_ID[i], on_drews_list, visit_ID[i], visit_r[i], r_ratio[i], visit_x_range[i], visit_x_median[i], visit_x_mean[i], visit_x_diff[i], bisector_fit[0], bisector_fit[1], visit_x_01[i], visit_x_03[i], visit_x_05[i], visit_x_07[i], visit_x_09[i], visit_FWHM[i], visit_height[i], visit_thresh[i], only_visit_ccfs[*,this_visit] 
+
+   ;PRINT, FORMAT = '(A20,2x,I1,2x,A20,2x,F8.3,2x,F8.3)', two_ID[i], on_drews_list[i], visit_ID[i], visit_r[i], r_ratio[i]
+
+   PRINTF, 8, FORMAT = '(A20,2x,I1,2x,A20,2x,A10,2x, F10.4,2x,F10.4,2x,F10.4,2x,F10.4,2x,F10.4,2x,F10.4,2x,F10.4,2x,F10.4,2x, F10.4,2x,F8.3,2x,F8.3,2x,F8.3,2x, F8.3,2x,F8.4, 2x,F12.4,2x,F8.3,2x,F8.3,2x,F8.3,2x,F8.3, 2x,F8.3,2x,F8.3,2x,F8.3,2x,F8.4,2x,F8.4)', $
+           two_ID[i], on_drews_list[i], visit_ID[i], visit_snr, $
+           primary_peak_height_401, r_401, primary_peak_height_151, r_151, primary_peak_height_101, r_101, primary_peak_height_51, r_51, $ 
+           visit_x_range[i], visit_x_median[i], visit_x_mean[i], visit_x_diff[i], $
+           bisector_fit[0], bisector_fit[1], $
+           visit_x_01[i], visit_x_03[i], visit_x_05[i], visit_x_07[i], visit_x_09[i], $
+           visit_FWHM[i], visit_height[i], visit_thresh[i], dip_depth_abs[i], dip_depth_rel[i] ;, only_visit_ccfs[*,this_visit] 
+
+;; the_binary_candidates[i].two_ID = two_ID[i]
+;; the_binary_candidates[i].on_drews_list = on_drews_list[i]
+;; the_binary_candidates[i].visit_ID = visit_ID[i]
+;; the_binary_candidates[i].visit_r = visit_r[i]
+;; the_binary_candidates[i].r_ratio = r_ratio[i]
+;; the_binary_candidates[i].dip_depth_abs = dip_depth_abs[i]
+;; the_binary_candidates[i].dip_depth_rel = dip_depth_rel[i]
+;; the_binary_candidates[i].visit_x_range = visit_x_range[i]
+;; the_binary_candidates[i].visit_x_median = visit_x_median[i]
+;; the_binary_candidates[i].visit_x_mean = visit_x_mean[i]
+;; the_binary_candidates[i].visit_x_diff = visit_x_diff[i]
+;; the_binary_candidates[i].bisector_fit_intercept = bisector_fit[0]
+;; the_binary_candidates[i].bisector_fit_slope = bisector_fit[1]
+;; the_binary_candidates[i].visit_x_01 = visit_x_01[i]
+;; the_binary_candidates[i].visit_x_03 = visit_x_03[i]
+;; the_binary_candidates[i].visit_x_05 = visit_x_05[i]
+;; the_binary_candidates[i].visit_x_07 = visit_x_07[i]
+;; the_binary_candidates[i].visit_x_09 = visit_x_09[i]
+;; the_binary_candidates[i].visit_FWHM = visit_FWHM[i]
+;; the_binary_candidates[i].visit_height = visit_height[i]
+;; the_binary_candidates[i].visit_thresh = visit_thresh[i]
+
+   ENDIF
+
+ENDFOR
+
+;MWRFITS, the_binary_candidates, 'DR13_visit_CCF_stats.fits', /CREATE
+
+CLOSE, 7
+CLOSE, 8
+
+usable_bisectors = WHERE(use_bisectors EQ 1, n_usable_bisectors)
+
+PRINT, 'Usable bisectors: ', n_usable_bisectors
+
+uniq_ids = UNIQ(two_id, SORT(two_id))
+n_uniq_ids = N_ELEMENTS(uniq_ids)
+PRINT, 'Uniq stars: ', n_uniq_ids
+
+min_r = FLTARR(n_uniq_ids)
+min_r_ratio = FLTARR(n_uniq_ids)
+max_x_range = FLTARR(n_uniq_ids)
+median_slope = FLTARR(n_uniq_ids)
+slope_sigma = FLTARR(n_uniq_ids)
+max_dip_depth_abs = FLTARR(n_uniq_ids)
+max_dip_depth_rel = FLTARR(n_uniq_ids)
+
+CLOSE, 3
+OPENW, 3, 'Possible_binaries.tbl'
+
+CLOSE, 2
+OPENW, 2, 'Bisector_stats.tbl'
+
+PRINTF, 2, FORMAT = '(A100)', '2MASS_ID          Drew  MIN(r) MIN(r_ratio)  MAX(x_range) MEDIAN(slope) STDDEV(slope)  MAX(abs_dip)  MAX(rel_dip)'
+PRINTF, 3, FORMAT = '(A100)', '2MASS_ID          Drew  MIN(r) MIN(r_ratio)  MAX(x_range) MEDIAN(slope) STDDEV(slope)  MAX(abs_dip)  MAX(rel_dip)'
+;two_id[uniq_ids[i]], on_drews_list[uniq_ids[i]], min_r[i], min_r_ratio[i], max_x_range[i], median_slope[i], slope_sigma[i]
+
+FOR i = 0L, n_uniq_ids-1 DO BEGIN
+
+   usable_visits = WHERE(two_ID EQ two_id(uniq_ids[i]) AND use_bisectors EQ 1, n_usable_this_source)
+
+   IF n_usable_this_source GT 1 THEN BEGIN
+
+      min_r[i] = MIN(visit_r[usable_visits])
+      min_r_ratio[i] = MIN(r_ratio[usable_visits])
+      max_x_range[i] = MAX(visit_x_range[usable_visits])
+      median_slope[i] = MEDIAN(bisector_slopes[usable_visits])
+      slope_sigma[i] = STDDEV(bisector_slopes[usable_visits])
+      max_dip_depth_abs[i] = MAX(dip_depth_abs[usable_visits])
+      max_dip_depth_rel[i] = MAX(dip_depth_rel[usable_visits])
+
+   ENDIF ELSE BEGIN
+
+      IF n_usable_this_source EQ 1 THEN BEGIN
+
+      min_r[i] = visit_r[usable_visits]
+      min_r_ratio[i] = r_ratio[usable_visits]
+      max_x_range[i] = visit_x_range[usable_visits]
+      median_slope[i] = bisector_slopes[usable_visits]
+      slope_sigma[i] = 0.
+      max_dip_depth_abs[i] = dip_depth_abs[usable_visits]
+      max_dip_depth_rel[i] = dip_depth_rel[usable_visits]
+
+      ENDIF ELSE BEGIN
+
+       min_r[i] = 9999.
+       min_r_ratio[i] = 9999.
+       max_x_range[i] = 9999.
+      median_slope[i] = 9999.
+      slope_sigma[i] = 9999.
+      max_dip_depth_abs[i] = 9999.
+      max_dip_depth_rel[i] = 9999.
+
+      ENDELSE 
+
+   ENDELSE
+
+   ;visits_to_use = INTARR(n_visits)
+   ;visits_to_use[*] = 0
+
+   ;apload, '/Volumes/CoveyData/APOGEE_Spectra/APOGEE2_DR13/'+STRMID(
+
+   ;FOR j=1, n_visits DO BEGIN
+
+   ;ENDFOR
+
+   PRINTF, 2, FORMAT = '(A20, 2x, I1, 2x, F8.2, 2x, F8.3, 2x, F8.2, 2x, F8.2, 2x, F8.2, 2x, F8.2, 2x, F8.2)', two_id[uniq_ids[i]], on_drews_list[uniq_ids[i]], min_r[i], min_r_ratio[i], max_x_range[i], median_slope[i], slope_sigma[i], max_dip_depth_abs[i], max_dip_depth_rel[i]
+
+   IF ALOG10(min_r[i]) LT 1.75 AND ALOG10(max_x_range[i]) GT 0.75 THEN PRINTF, 3, FORMAT = '(A20, 2x, I1, 2x, F8.2, 2x, F8.2, 2x, F8.3, 2x, F8.3, 2x, F8.3, 2x, F8.3, 2x, F8.3)', two_id[uniq_ids[i]], on_drews_list[uniq_ids[i]], min_r[i], max_x_range[i], median_slope[i], slope_sigma[i], visit_height[i], max_dip_depth_abs[i], max_dip_depth_rel[i]
+
+ENDFOR
+
+CLOSE, 2
+CLOSE, 3
+
+sensible_values = WHERE(min_r LT 9998. AND max_x_range LT 9999., n_sensible_values)
+
+;set up plotting defaults
+;!p.multi=[0,1,1]
+SET_PLOT, 'PS'
+!P.FONT=2
+!P.THICK=2
+!P.CHARSIZE=1.5
+!P.CHARTHICK=2.
+!X.THICK=3
+!Y.THICK=3
+LOADCT, 0, /SILENT
+PLOTSYM, 0, /FILL
+
+DEVICE, FILENAME = 'Bisector_plots.ps', /LANDSCAPE, ENCAPSULATED = 0, /INCHES, XSIZE = 10, YSIZE = 7, XOFFSET = 1.0, /COLOR, /SCHOOLBOOK
+
+CONTOUR_PLUS, ALOG10(max_x_range[sensible_values]), ALOG10(min_r[sensible_values]), XTITLE = 'log!D10!N(max x range)', YTITLE = 'log!D10!N(min R)', LEVELS = 6, XBINS = 20, YBINS = 20
+LOADCT, 13, /SILENT
+OPLOT, [0.75,0.75,2.6], [-0.5,1.75,1.75], COLOR = 255, LINESTYLE = 255, THICK = 5
+DEVICE, /CLOSE
+
+END
