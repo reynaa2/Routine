@@ -1,5 +1,6 @@
 from astropy.io import fits
 import apogee.tools.read as apread
+import numpy as np
 
 allStarDR14 = apread.allStar(rmcommissioning=True,main=False,ak=True,akvers='targ',adddist=False)
 locationIDs = allStarDR14['LOCATION_ID']
@@ -108,9 +109,9 @@ def ccf_loop(locationID,apogeeID,nvisits,r401,r151,r101,r51,mxr,fwhm,CCF):
 # Main routine to call in data stored in each CCF:
 x = np.arange(0,401,1)
 for i in range(len(apogeeIDs)):
-        apogeeID = apogeeID[i]
-        locationID = locationID[i]
-        path = '/Volumes/coveydata/APOGEE_Spectra/APOGEE2_DR14/dr14/apogee/spectro/redux/r8/stars/apo25m/'+locationID+'/'+apogeeID
+        apogeeID = apogeeIDs[i]
+        locationID = locationIDs[i]
+        path = '/Volumes/coveydata/APOGEE_Spectra/APOGEE2_DR14/dr14/apogee/spectro/redux/r8/stars/apo25m/'+str(locationID)+'/'+'apStar-r8-'+str(apogeeID)+'.fits'
         if len(path) == 34: #If Statement designed to read in apStarC files
             if locationID != 1:
                 CData = fits.open(path)
